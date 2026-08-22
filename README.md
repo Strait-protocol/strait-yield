@@ -43,7 +43,7 @@ This is the standard peer-to-pool lending shape (Aave/Compound-style), with BTC 
 2. **Borrow** — User requests a loan (USDC or VUSD, borrower's choice) against locked BTC, up to 60% LTV, drawn from the shared pool.
 3. **Monitor** — Position health (current LTV vs. BTC price) tracked continuously. BTC price feed needed (see §6).
 4. **Liquidation (if triggered)** — If LTV crosses 80%, `StraitLiquidator` initiates a Dutch auction on the BTC collateral to repay the loan and protect depositors.
-5. **Repay & withdraw** — User repays USDC/VUSD + interest, unlocks BTC collateral back through the tunnel. Interest paid flows into the pool for depositors.
+5. **Repay & withdraw** — User repays USDC/VUSD + interest. BTC collateral is released back through the tunnel only once the debt is repaid in full (no partial-unlock in v1). Interest paid flows into the pool for depositors.
 
 ## 4. Architecture
 
@@ -82,12 +82,15 @@ Practically: on collateral deposit, `strait-yield` either (a) receives a webhook
 
 ## 6. Open questions / decisions needed
 
-- **Deployment chain for the pool:** Given VUSD is Hemi-native, does `StraitYieldVault` live on Hemi itself (natural home for VUSD, and BTC collateral is already Hemi-tunneled) with USDC bridged in as needed, or does it live on Ethereum mainnet with VUSD bridged out? Deploying on Hemi is likely the simpler path since collateral is already there — recommend defaulting to Hemi-native deployment unless there's a reason to anchor on mainnet.
-- **Price oracle:** Chainlink BTC/USD is the obvious default, but confirm availability/cost on Hemi (or wherever the vault deploys). Alternative: use `strait-analytics`'s existing CoinGecko integration as a fallback/secondary feed, though CoinGecko is not oracle-grade for liquidation triggers and should not be primary.
-- **Interest rate model:** Fixed rate vs. utilization-based (Aave/Compound-style) — not yet decided. Utilization-based is more standard for a two-sided pool market (rates rise as pool liquidity is drawn down) and fits this model better than a fixed rate would.
-- **Cross-asset pool accounting:** Since both USDC and VUSD are supported, decide whether they're two separate pools (simpler accounting, no cross-asset risk) or one unified pool with internal accounting between the two (more capital-efficient, more complex). Recommend starting with two separate pools for v1 — much simpler to reason about and audit.
-- **Liquidation bot / keeper network:** Who triggers `StraitLiquidator` when a position crosses threshold? Needs either a permissionless keeper incentive (gas rebate + bounty) or a self-run bot initially.
-- **Depositor yield source:** Confirm yield is purely borrower interest (standard model) rather than also including protocol emissions/incentives — affects whether a token/points system needs designing now or can wait.
+*Decisions below are current best answers, not final — subject to change as the project develops.*
+
+- **Deployment chain for the pool:** ✅ **Decided (subject to change):** `StraitYieldVault` deploys Hemi-native. Hemi's seamless BTC↔ETH interaction is the deciding factor — it's the natural home for VUSD, BTC collateral is already Hemi-tunneled, and it avoids bridging USDC in from Ethereum for the loan leg.
+- **Price oracle:** ✅ **Decided (subject to change):** Chainlink BTC/USD is primary. CoinGecko (via `strait-analytics`'s existing integration) serves as the backup/fallback feed if Chainlink is unavailable or stale — still need to define the staleness threshold that triggers failover.
+- **Interest rate model:** ✅ **Decided (subject to change):** Utilization-based (Aave/Compound-style), priced at industry-standard rate + 1%. Exact utilization curve/kink parameters still TBD, to be tuned with backtesting.
+- **Cross-asset pool accounting:** ✅ **Decided (subject to change):** USDC and VUSD are distinct assets and are never bridged/converted between each other within the vault — they run as two separate pools with independent accounting. The borrower chooses which asset (USDC or VUSD) they receive the loan in at borrow time; that choice is independent of which asset(s) they deposit as a lender.
+- **Liquidation bot / keeper network:** ✅ **Decided (subject to change):** Self-run bot for v1 — monitors position health and triggers `StraitLiquidator` directly. A permissionless keeper-incentive model (gas rebate + bounty) can be layered on later once there's real TVL and decentralizing this liveness dependency matters more.
+- **Depositor yield source:** ✅ **Decided (subject to change):** Yield is purely borrower interest — no protocol emissions/incentive token for v1. A token/points system is out of scope unless revisited later.
+- **Bad debt handling:** ✅ **Decided (subject to change):** If a liquidation auction fails to fully cover outstanding debt (e.g. BTC price gaps down faster than the auction can clear), the protocol claims/absorbs the resulting bad debt rather than socializing the loss across depositor balances. Funding source for this (protocol treasury, insurance fund, etc.) still TBD.
 
 ## 7. "Spend anywhere" — scope decision needed
 
@@ -100,13 +103,16 @@ This phrase covers two very different builds. Pick one for v1:
 
 ## 8. Risk parameters (initial, subject to backtesting)
 
+*Values below are current working assumptions, not final — subject to change as the project develops.*
+
 | Parameter | Value | Notes |
 |---|---|---|
 | Max LTV | 60% | Origination cap |
 | Liquidation threshold | 80% | Triggers Dutch auction |
-| Liquidation penalty | TBD | Standard range 5–15% in comparable protocols |
+| Liquidation penalty | 0.5% | Set to industry-standard rate rather than the earlier 5–15% placeholder — revisit after backtesting |
 | Auction start price | TBD | Typically starts above spot, decays to spot or below over auction window |
-| Auction duration | TBD | Needs backtesting against BTC volatility to avoid under/over-selling collateral |
+| Auction duration | 24h | Needs backtesting against BTC volatility to avoid under/over-selling collateral |
+| Bad debt (uncovered by auction) | Protocol-absorbed | See §6 — protocol claims shortfall rather than socializing it across depositors |
 
 ## 9. Build phases
 
@@ -131,7 +137,7 @@ This phrase covers two very different builds. Pick one for v1:
 ## 10. Dependencies on decisions outside this doc
 
 - Grant outcome may affect timeline/resourcing but shouldn't block starting Phase 1, since this reuses already-shipped indexing infra.
-- Confirm whether `strait-yield` launches on Hemi-native liquidity or purely bridges out to Ethereum mainnet for the loan leg — affects contract deployment targets in §5.
+- ✅ Resolved: `strait-yield` launches on Hemi-native liquidity (see §6) — contract deployment targets in §5 should assume Hemi as the primary chain.
 
 ---
 
